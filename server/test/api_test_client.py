@@ -7,16 +7,16 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 
 def call_api(
     base_url: str,
     path: str,
     method: str = "GET",
-    payload: Optional[Dict[str, Any]] = None,
+    payload: dict[str, Any] | None = None,
     timeout: float = 5.0,
-) -> Tuple[int, str]:
+) -> tuple[int, str]:
     url = f"{base_url.rstrip('/')}{path}"
     data = None
     headers = {}
@@ -132,14 +132,22 @@ def run_load_probe(base_url: str, timeout: float, iterations: int) -> None:
         status, body = call_api(base_url, "/db/stats", timeout=timeout)
         assert_status(status, 200, f"GET /db/stats load iteration {i + 1}")
         if not isinstance(parse_json(body), dict):
-            raise AssertionError(f"GET /db/stats load iteration {i + 1}: malformed JSON")
+            raise AssertionError(
+                f"GET /db/stats load iteration {i + 1}: malformed JSON"
+            )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run backend API smoke/load checks.")
-    parser.add_argument("--base-url", default="http://127.0.0.1:19819", help="Backend base URL")
-    parser.add_argument("--timeout", type=float, default=5.0, help="HTTP timeout in seconds")
-    parser.add_argument("--iterations", type=int, default=120, help="Number of repeated load requests")
+    parser.add_argument(
+        "--base-url", default="http://127.0.0.1:19819", help="Backend base URL"
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=5.0, help="HTTP timeout in seconds"
+    )
+    parser.add_argument(
+        "--iterations", type=int, default=120, help="Number of repeated load requests"
+    )
     args = parser.parse_args()
 
     start = time.time()

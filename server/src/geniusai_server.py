@@ -2,34 +2,33 @@ import os
 import sys
 import threading
 import time
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from waitress import serve
-import datetime
 import json
 
 # Import modularized components
-from config import logger, args, DB_PATH
-from service_version import get_backend_version_info
-logger.info("Imported config")
+import config
+from config import logger, args
+from services.version import get_backend_version_info
 
 # Lazy import server_lifecycle to speed up startup
 import server_lifecycle
-logger.info("Imported server_lifecycle")
 
 # Import blueprints only (services are imported by routes when needed)
-from routes_index import index_bp
-from routes_edit import edit_bp
-from routes_search import search_bp
-from routes_server import server_bp
-from routes_db import db_bp
-from routes_import import import_bp
-from routes_clip import clip_bp
-from routes_faces import faces_bp
-from routes_training import training_bp
-from routes_style_edit import style_edit_bp
-import service_chroma
-import service_persons
-import service_db
+from routes.index import index_bp
+from routes.edit import edit_bp
+from routes.search import search_bp
+from routes.server import server_bp
+from routes.db import db_bp
+from routes.import_ import import_bp
+from routes.clip import clip_bp
+from routes.faces import faces_bp
+from routes.training import training_bp
+from routes.style_edit import style_edit_bp
+from routes.keywords import keywords_bp
+from services import chroma as service_chroma
+from services import persons as service_persons
+from services import db as service_db
 
 app = Flask(__name__)
 logger.info("Flask app created")
@@ -45,6 +44,7 @@ app.register_blueprint(import_bp)
 app.register_blueprint(faces_bp)
 app.register_blueprint(training_bp)
 app.register_blueprint(style_edit_bp)
+app.register_blueprint(keywords_bp)
 
 
 def _bool_env(name: str, default: bool = False) -> bool:
@@ -66,7 +66,9 @@ def _start_faces_cluster_scheduler() -> None:
       GENIUSAI_FACES_CLUSTER_LINKAGE    ("complete" | "average"; default: "complete")
     """
     if not _bool_env("GENIUSAI_FACES_CLUSTER_ENABLED", default=False):
-        logger.info("Faces cluster scheduler disabled (GENIUSAI_FACES_CLUSTER_ENABLED not set).")
+        logger.info(
+            "Faces cluster scheduler disabled (GENIUSAI_FACES_CLUSTER_ENABLED not set)."
+        )
         return
 
     try:
@@ -87,7 +89,11 @@ def _start_faces_cluster_scheduler() -> None:
         except ValueError:
             min_faces = None
 
-    linkage = (os.environ.get("GENIUSAI_FACES_CLUSTER_LINKAGE", "complete") or "complete").strip().lower()
+    linkage = (
+        (os.environ.get("GENIUSAI_FACES_CLUSTER_LINKAGE", "complete") or "complete")
+        .strip()
+        .lower()
+    )
     if linkage not in ("complete", "average"):
         linkage = "complete"
 
@@ -150,12 +156,16 @@ def _start_housekeeping_scheduler() -> None:
         while True:
             try:
                 zip_path, backup_name = service_db.build_backup_zip()
-                logger.info("Periodic DB backup created: %s (%s)", backup_name, zip_path)
+                logger.info(
+                    "Periodic DB backup created: %s (%s)", backup_name, zip_path
+                )
                 service_db.prune_old_backups(max_keep=max_keep)
                 try:
                     os.remove(zip_path)
                 except OSError as e:
-                    logger.warning("Could not remove temporary backup zip %s: %s", zip_path, e)
+                    logger.warning(
+                        "Could not remove temporary backup zip %s: %s", zip_path, e
+                    )
             except Exception as e:
                 logger.error("Periodic DB backup failed: %s", e, exc_info=True)
             time.sleep(interval)
@@ -163,25 +173,75 @@ def _start_housekeeping_scheduler() -> None:
     t = threading.Thread(target=_loop, name="db-backup-scheduler", daemon=True)
     t.start()
 
+
+# Endpoints that don't need (and shouldn't pay the cost of) a chroma init:
+# liveness checks and the explicit init route, which handles db_path itself.
+_DB_PATH_BYPASS_ENDPOINTS = frozenset(
+    {
+        "server.ping",
+        "server.initialize",
+    }
+)
+
+
+@app.before_request
+def _auto_bind_db_path():
+    """Fallback recovery: if a request carries `db_path` and the backend
+    isn't bound to it yet (e.g. after an unexpected process restart), bind
+    it transparently before the route runs. No-op when already matching.
+    """
+    if request.endpoint in _DB_PATH_BYPASS_ENDPOINTS:
+        return
+
+    db_path = None
+    if request.method in ("POST", "PUT", "PATCH"):
+        data = request.get_json(silent=True, cache=True)
+        if isinstance(data, dict):
+            db_path = data.get("db_path")
+    if not db_path:
+        db_path = request.args.get("db_path")
+    if not db_path:
+        return
+
+    try:
+        service_chroma.ensure_db_path(db_path)
+    except Exception as e:
+        # Don't 500 here — let the route's own error handling report the
+        # underlying failure with more context. We only log so we can see
+        # an init crash separately from the route-level failure.
+        logger.error("Auto-bind to db_path %s failed: %s", db_path, e, exc_info=True)
+
+
 @app.errorhandler(500)
 def handle_internal_server_error(e):
     logger.error(f"Internal Server Error: {e}")
     return jsonify({"error": "Internal Server Error"}), 500
 
+
 if __name__ == "__main__":
     version_info = get_backend_version_info()
     logger.info("=" * 60)
-    logger.info("LrGenius Server version %s (build %s)", version_info.get("backend_version", "?"), version_info.get("backend_build", "?"))
+    logger.info(
+        "LrGenius Server version %s (build %s)",
+        version_info.get("backend_version", "?"),
+        version_info.get("backend_build", "?"),
+    )
     logger.info("LrGenius Server starting...")
     logger.info(f"Python: {sys.version.split()[0]}")
-    logger.info(f"Database Path: {DB_PATH or 'Idle (waiting for plugin initialize)'}")
+    logger.info(
+        f"Database Path: {config.DB_PATH or 'Idle (waiting for plugin initialize)'}"
+    )
     logger.info("=" * 60)
-    
+
     # Optional one-shot ID migration for deployed databases.
     # Set GENIUSAI_MIGRATION_FILE to a JSON list/object with mappings.
     migration_file = os.environ.get("GENIUSAI_MIGRATION_FILE", "").strip()
     if migration_file and config.DB_PATH:
-        migration_path = migration_file if os.path.isabs(migration_file) else os.path.join(config.DB_PATH, migration_file)
+        migration_path = (
+            migration_file
+            if os.path.isabs(migration_file)
+            else os.path.join(config.DB_PATH, migration_file)
+        )
         try:
             with open(migration_path, "r", encoding="utf-8") as f:
                 payload = json.load(f)
@@ -193,19 +253,21 @@ if __name__ == "__main__":
 
     # Mark server as ready for startup scripts
     server_lifecycle.write_ok_file()
-    
+
     # Write PID for lifecycle management
     server_lifecycle.write_pid_file()
 
     # Start optional background schedulers (housekeeping, clustering)
     _start_housekeeping_scheduler()
     _start_faces_cluster_scheduler()
-    
+
     host = os.environ.get("GENIUSAI_HOST", "127.0.0.1")
     port = int(os.environ.get("GENIUSAI_PORT", "19819"))
     try:
         if args.debug:
-            logger.info(f"Starting Flask development server in debug mode on http://{host}:{port}")
+            logger.info(
+                f"Starting Flask development server in debug mode on http://{host}:{port}"
+            )
             app.run(debug=True, host=host, port=port)
         else:
             logger.info(f"Starting production server on http://{host}:{port}")

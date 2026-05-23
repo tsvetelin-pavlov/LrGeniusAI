@@ -6,7 +6,7 @@
 # AI Lightroom edit recipes: POST /edit (multipart) and POST /edit_base64 (JSON) – same image,
 # no extra Dockerfile COPY beyond src/.
 
-FROM python:3.12-slim
+FROM ghcr.io/astral-sh/uv:python3.12-trixie-slim
 
 WORKDIR /app
 
@@ -24,14 +24,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Abhängigkeiten
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+
+COPY uv.lock pyproject.toml .
+RUN uv sync --locked --no-dev
 
 # App source
 COPY src /app/src
-
-# Ensure app modules are importable at runtime
-ENV PYTHONPATH=/app:/app/src
 
 # Remote-Zugriff: Server auf allen Interfaces binden
 ENV GENIUSAI_HOST=0.0.0.0
@@ -50,4 +48,4 @@ VOLUME /models
 EXPOSE 19819
 
 # DB-Pfad zeigt auf das persistente Backend-Datenverzeichnis unter /data/db.
-CMD ["python", "/app/src/geniusai_server.py", "--db-path", "/data/db"]
+CMD ["uv", "run", "/app/src/geniusai_server.py", "--db-path", "/data/db"]
